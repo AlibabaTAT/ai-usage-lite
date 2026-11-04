@@ -27,6 +27,8 @@ pub struct Config {
     pub dock_y: f32,
     /// Last strip centre in screen pixels, to pick the monitor.
     pub dock_anchor: Option<(i32, i32)>,
+    /// Show the burn-rate forecast under each window.
+    pub forecast: bool,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             dock_right: true,
             dock_y: 0.62,
             dock_anchor: None,
+            forecast: true,
         }
     }
 }

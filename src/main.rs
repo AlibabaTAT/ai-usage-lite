@@ -10,6 +10,7 @@
 
 mod config;
 mod diag;
+mod forecast;
 mod http;
 mod model;
 mod paths;

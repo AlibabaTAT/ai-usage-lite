@@ -35,6 +35,7 @@ pub enum Action {
     /// Open the desktop client of a service.
     Launch(usize),
     SetDock(bool),
+    ToggleForecast,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -192,6 +193,35 @@ impl Ctx<'_, '_> {
         w
     }
 }
+
+/// Forecast for a window, if enabled and the data is live.
+fn forecast_of(i: &Input, win: &UsageWindow, dim: bool) -> Option<crate::forecast::Forecast> {
+    if !i.cfg.forecast || dim {
+        return None;
+    }
+    crate::forecast::forecast(win, i.now)
+}
+
+/// Soonest projected run-out among a service's windows.
+fn soonest_exhaust<'w>(i: &Input, wins: impl Iterator<Item = &'w UsageWindow>, dim: bool) -> Option<Duration> {
+    wins.filter_map(|w| forecast_of(i, w, dim)?.exhaust_in).min()
+}
+
+/// One quiet line: does the balance last until the reset, and if not, when
+/// it runs out.
+fn forecast_line(f: &crate::forecast::Forecast, _show_used: bool) -> (String, bool) {
+    match f.exhaust_in {
+        Some(d) => (exhaust_text(d), true),
+        None => ("可撑到重置".into(), false),
+    }
+}
+
+/// Short form for the mini card and compact list.
+fn exhaust_text(d: Duration) -> String {
+    format!("约 {}后用完", fmt::span(d))
+}
+
+const FORECAST_LINE_H: f32 = 17.0;
 
 fn stale_after(cfg: &Config) -> Duration {
     Duration::from_secs((u64::from(cfg.refresh_minutes) * 60 * 3).max(20 * 60))
@@ -353,7 +383,7 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
     for row in &st.rows {
         h += match row {
             Row::PoolTitle(_) => 24.0,
-            Row::Win(_) => 26.0,
+            Row::Win(w) => 26.0 + if forecast_of(i, w, st.dim).is_some() { FORECAST_LINE_H } else { 0.0 },
             Row::Message(m, _) => c.p.text_height(m, msg_font, inner_w) + 6.0,
         };
     }
@@ -389,8 +419,15 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
                 y += 24.0;
             }
             Row::Win(win) => {
-                window_row(c, id, win, Rect::new(inner_x, y, inner_w, 26.0), st.dim);
+                let fc = forecast_of(i, win, st.dim);
+                window_row(c, id, win, Rect::new(inner_x, y, inner_w, 26.0), st.dim, fc.as_ref());
                 y += 26.0;
+                if let Some(f) = &fc {
+                    let (text, alarm) = forecast_line(f, i.cfg.show_used);
+                    let color = if alarm { pal.text2 } else { pal.text3 };
+                    c.p.text(&text, Rect::new(inner_x + 56.0, y - 4.0, inner_w - 56.0, FORECAST_LINE_H), font(11.5, REGULAR, Align::Left), color);
+                    y += FORECAST_LINE_H;
+                }
             }
             Row::Message(m, color) => {
                 let mh = c.p.text_height(m, msg_font, inner_w);
@@ -402,7 +439,7 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
     y0 + h
 }
 
-fn window_row(c: &mut Ctx, id: ProviderId, win: &UsageWindow, r: Rect, dim: bool) {
+fn window_row(c: &mut Ctx, id: ProviderId, win: &UsageWindow, r: Rect, dim: bool, fc: Option<&crate::forecast::Forecast>) {
     let pal = *c.pal();
     let show_used = c.i.cfg.show_used;
     let remaining = win.remaining();
@@ -421,9 +458,11 @@ fn window_row(c: &mut Ctx, id: ProviderId, win: &UsageWindow, r: Rect, dim: bool
     c.p.text(&win.label, label, font(12.0, REGULAR, Align::Left), label_color);
     c.p.fill_round(bar, 3.0, pal.track);
     let frac = (value / 100.0).clamp(0.0, 1.0) as f32;
+    let color = if dim { pal.text3 } else { level };
+    let _ = fc;
     if frac > 0.0 {
         let fill = Rect::new(bar.x, bar.y, (bar.w * frac).max(bar.h), bar.h);
-        c.p.fill_round(fill, 3.0, if dim { pal.text3 } else { level });
+        c.p.fill_round(fill, 3.0, color);
     }
     // Numbers stay neutral; only the bar carries the brand colour. Red when nearly out.
     let pct_color = if dim { pal.text2 } else if remaining < crate::ui::tray::DANGER_BELOW { pal.danger } else { pal.text };
@@ -444,7 +483,7 @@ fn short_label(label: &str) -> String {
 fn compact_list(c: &mut Ctx, ids: &[ProviderId], y0: f32) -> f32 {
     let pal = *c.pal();
     let i = c.i;
-    let row_h = 54.0;
+    let row_h = 52.0;
     let card = Rect::new(PAD, y0, WIDTH - 2.0 * PAD, row_h * ids.len() as f32);
     c.card_bg(card);
     for (k, id) in ids.iter().enumerate() {
@@ -464,9 +503,11 @@ fn compact_list(c: &mut Ctx, ids: &[ProviderId], y0: f32) -> f32 {
             .filter_map(|r| if let Row::Win(w) = r { Some(w) } else { None })
             .collect();
         // Sub line: an error, or when the tightest window comes back.
-        let sub_rect = Rect::new(tx, y + 28.0, 120.0, 16.0);
+        let sub_rect = Rect::new(tx, y + 28.0, card.right() - 14.0 - tx, 16.0);
         if let Some((text, color)) = &st.chip {
             c.p.text(text, sub_rect, font(11.5, SEMIBOLD, Align::Left), *color);
+        } else if let Some(d) = soonest_exhaust(i, wins.iter().copied(), st.dim) {
+            c.p.text(&exhaust_text(d), sub_rect, font(11.5, REGULAR, Align::Left), pal.text2);
         } else if let Some(tight) = wins.iter().min_by(|a, b| a.remaining().total_cmp(&b.remaining())) {
             let when = fmt::reset(tight.resets_at, i.now);
             let s = if when.is_empty() {
@@ -500,19 +541,22 @@ fn compact_list(c: &mut Ctx, ids: &[ProviderId], y0: f32) -> f32 {
         };
         let mut right = card.right() - 14.0;
         for win in first_pool.iter().take(2).rev() {
-            let block = Rect::new(right - 88.0, y, 88.0, row_h);
+            // Meters sit on the name line so the sub line has the full width.
+            let line_y = y + 9.0;
+            let line_h = 19.0;
+            let block = Rect::new(right - 88.0, line_y, 88.0, line_h);
             let remaining = win.remaining();
             let value = if i.cfg.show_used { win.used.clamp(0.0, 100.0) } else { remaining };
             let level = if st.dim { pal.text3 } else { pal.usage(*id, remaining) };
-            c.p.text(&short_label(&win.label), Rect::new(block.x, y, 20.0, row_h), font(11.5, REGULAR, Align::Left), pal.text3);
-            let bar = Rect::new(block.x + 21.0, y + row_h / 2.0 - 2.0, 28.0, 4.0);
+            c.p.text(&short_label(&win.label), Rect::new(block.x, line_y, 20.0, line_h), font(11.5, REGULAR, Align::Left), pal.text3);
+            let bar = Rect::new(block.x + 21.0, line_y + line_h / 2.0 - 2.0, 28.0, 4.0);
             c.p.fill_round(bar, 2.0, pal.track);
             let frac = (value / 100.0).clamp(0.0, 1.0) as f32;
             if frac > 0.0 {
                 c.p.fill_round(Rect::new(bar.x, bar.y, (bar.w * frac).max(4.0), 4.0), 2.0, level);
             }
             let color = if st.dim { pal.text2 } else if remaining < crate::ui::tray::DANGER_BELOW { pal.danger } else { pal.text };
-            c.p.text(&fmt::percent(value), Rect::new(bar.right() + 2.0, y, 37.0, row_h), font(12.5, SEMIBOLD, Align::Right), color);
+            c.p.text(&fmt::percent(value), Rect::new(bar.right() + 2.0, line_y, 37.0, line_h), font(12.5, SEMIBOLD, Align::Right), color);
             right = block.x - 4.0;
         }
     }
@@ -560,6 +604,15 @@ fn settings_page(c: &mut Ctx) -> f32 {
         vec![Action::SetDock(true), Action::SetDock(false)],
     );
     y += 32.0 + 14.0;
+
+    let row = Rect::new(PAD, y, WIDTH - 2.0 * PAD, 44.0);
+    c.card_bg(row);
+    if c.hit(row, Action::ToggleForecast) {
+        c.p.fill_round(Rect::new(row.x + 4.0, row.y + 4.0, row.w - 8.0, row.h - 8.0), 6.0, pal.hover);
+    }
+    c.p.text("显示消耗速度与用完预估", Rect::new(PAD + 14.0, y, 240.0, 44.0), font(13.0, REGULAR, Align::Left), pal.text);
+    c.toggle(row.right() - 14.0, y + 22.0, i.cfg.forecast);
+    y += 44.0 + 14.0;
 
     y = section_label(c, "自动刷新间隔", y);
     let labels: Vec<String> = REFRESH_CHOICES.iter().map(|m| format!("{m} 分钟")).collect();
@@ -616,7 +669,7 @@ fn settings_page(c: &mut Ctx) -> f32 {
     y = card.bottom() + 10.0;
     let mem = crate::ui::window::private_mb().map(|m| format!(" · 内存 {m:.1} MB")).unwrap_or_default();
     c.p.text(
-        &format!("v0.2.2{mem} · 配置 %APPDATA%\\AI-Usage-Lite"),
+        &format!("v0.3.2{mem} · 配置 %APPDATA%\\AI-Usage-Lite"),
         Rect::new(20.0, y, WIDTH - 40.0, 22.0),
         font(11.0, REGULAR, Align::Left),
         pal.text3,
@@ -707,14 +760,21 @@ fn mini_page(c: &mut Ctx) -> f32 {
                 let label = format!("{} {}", super::view::short_label_cn(&win.label), fmt::percent(value));
                 c.p.text(&label, right, font(13.0, SEMIBOLD, Align::Right), color);
                 let when = fmt::reset(win.resets_at, i.now);
+                let all: Vec<&UsageWindow> = st.rows.iter().filter_map(|r| if let Row::Win(w) = r { Some(w) } else { None }).collect();
+                let exhaust = soonest_exhaust(i, all.iter().copied(), st.dim);
                 let line = match chip {
                     Some((text, _)) => text.clone(),
+                    None if exhaust.is_some() => exhaust_text(exhaust.unwrap()),
                     None if when.is_empty() => st.sub.clone(),
                     None if when.ends_with('后') => format!("{when}恢复"),
                     None => format!("{when} 恢复"),
                 };
-                let color = chip.as_ref().map(|(_, c)| *c).unwrap_or(pal.text3);
-                c.p.text(&line, sub, font(11.5, REGULAR, Align::Left), color);
+                let (color, weight) = match chip {
+                    Some((_, c)) => (*c, REGULAR),
+                    None if exhaust.is_some() => (pal.text2, REGULAR),
+                    None => (pal.text3, REGULAR),
+                };
+                c.p.text(&line, sub, font(11.5, weight, Align::Left), color);
             }
             (None, Some((text, color))) => {
                 c.p.text(text, right, font(12.0, SEMIBOLD, Align::Right), *color);

@@ -379,6 +379,7 @@ impl App {
                 }
                 return;
             }
+            Action::ToggleForecast => self.update_config(|c| c.forecast = !c.forecast),
             Action::SetDock(on) => {
                 self.update_config(|c| c.dock = on);
                 if on { self.create_dock() } else { self.destroy_dock() }
