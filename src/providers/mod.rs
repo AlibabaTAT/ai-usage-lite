@@ -47,7 +47,7 @@ fn hours(h: f64) -> Option<SystemTime> {
 }
 
 pub fn demo(id: ProviderId) -> Snapshot {
-    let w = |label: &str, used: f64, h: f64| UsageWindow { label: label.into(), used, resets_at: hours(h) };
+    let w = |label: &str, used: f64, h: f64| UsageWindow { label: label.into(), used, resets_at: hours(h), recent_rate: None };
     match id {
         ProviderId::Claude => Snapshot {
             pools: vec![Pool { name: String::new(), windows: vec![w("5 小时", 25.0, 3.55), w("本周", 23.0, 101.2)] }],

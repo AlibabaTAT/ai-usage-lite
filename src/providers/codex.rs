@@ -116,7 +116,7 @@ fn snapshot_from(response: UsageResponse) -> Option<Snapshot> {
     let details = response.rate_limit.flatten();
     let monthly = response.spend_control.and_then(|s| s.individual_limit).and_then(|l| {
         let used = l.used_percent?.clamp(0.0, 100.0);
-        used.is_finite().then(|| UsageWindow { label: "30 天".into(), used, resets_at: unix_to_system_time(l.reset_at) })
+        used.is_finite().then(|| UsageWindow { label: "30 天".into(), used, resets_at: unix_to_system_time(l.reset_at), recent_rate: None })
     });
     if details.is_none() && monthly.is_none() {
         return None;
@@ -133,6 +133,7 @@ fn snapshot_from(response: UsageResponse) -> Option<Snapshot> {
                 label: if is_weekly { "本周".into() } else { "5 小时".into() },
                 used: w.used_percent,
                 resets_at: unix_to_system_time(Some(w.reset_at)),
+                recent_rate: None,
             };
             if is_weekly {
                 weekly = Some(q);

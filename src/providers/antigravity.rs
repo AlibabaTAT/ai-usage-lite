@@ -238,7 +238,7 @@ fn snapshot_from_summary(summary: SummaryResponse) -> Option<Snapshot> {
                 b.bucket_id.as_deref().unwrap_or("-"),
                 b.display_name.as_deref().unwrap_or("")
             ));
-            windows.push(UsageWindow { label, used: (1.0 - remaining.clamp(0.0, 1.0)) * 100.0, resets_at: parse_iso8601(b.reset_time.as_deref()) });
+            windows.push(UsageWindow { label, used: (1.0 - remaining.clamp(0.0, 1.0)) * 100.0, resets_at: parse_iso8601(b.reset_time.as_deref()), recent_rate: None });
         }
         // 5 小时 first, then weekly, then anything else.
         windows.sort_by_key(|w| match w.label.as_str() {
@@ -262,7 +262,7 @@ fn snapshot_from_models(models: &ModelsResponse) -> Option<Snapshot> {
         .filter_map(|(_, info)| {
             let q = info.quota_info.as_ref()?;
             let rem = q.remaining_fraction?.clamp(0.0, 1.0);
-            Some(UsageWindow { label: "当前".into(), used: (1.0 - rem) * 100.0, resets_at: parse_iso8601(q.reset_time.as_deref()) })
+            Some(UsageWindow { label: "当前".into(), used: (1.0 - rem) * 100.0, resets_at: parse_iso8601(q.reset_time.as_deref()), recent_rate: None })
         })
         .min_by(|a, b| b.used.total_cmp(&a.used))?;
     Some(Snapshot { pools: vec![Pool { name: "Gemini".into(), windows: vec![best] }], source: "Antigravity 登录（模型额度）".into() })

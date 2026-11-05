@@ -669,7 +669,7 @@ fn settings_page(c: &mut Ctx) -> f32 {
     y = card.bottom() + 10.0;
     let mem = crate::ui::window::private_mb().map(|m| format!(" · 内存 {m:.1} MB")).unwrap_or_default();
     c.p.text(
-        &format!("v0.3.2{mem} · 配置 %APPDATA%\\AI-Usage-Lite"),
+        &format!("v0.3.4{mem} · 配置 %APPDATA%\\AI-Usage-Lite"),
         Rect::new(20.0, y, WIDTH - 40.0, 22.0),
         font(11.0, REGULAR, Align::Left),
         pal.text3,
@@ -748,7 +748,8 @@ fn mini_page(c: &mut Ctx) -> f32 {
             c.p.line(14.0, y, w - 14.0, y, pal.divider, 1.0);
         }
         let st = status_of(i, *id);
-        c.tile(14.0, y + 11.0, 22.0, *id);
+        // The icon opens the client; the rest of the card opens the full panel.
+        c.launch_tile(Rect::new(14.0, y + 11.0, 22.0, 22.0), *id);
         c.p.text(id.name(), Rect::new(46.0, y + 5.0, 100.0, 18.0), font(13.0, SEMIBOLD, Align::Left), pal.text);
         let right = Rect::new(w - 14.0 - 90.0, y + 5.0, 90.0, 20.0);
         let sub = Rect::new(46.0, y + 23.0, w - 60.0, 16.0);

@@ -32,6 +32,9 @@ pub struct UsageWindow {
     /// Percentage already used, 0..=100.
     pub used: f64,
     pub resets_at: Option<SystemTime>,
+    /// Recent consumption rate in percent per second, from readings this app
+    /// took over the last part of the window. Filled in by the scheduler.
+    pub recent_rate: Option<f64>,
 }
 
 impl UsageWindow {

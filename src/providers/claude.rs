@@ -161,16 +161,16 @@ fn snapshot_from(response: UsageResponse) -> Snapshot {
     let mut have_session = false;
     let mut have_weekly = false;
     if let Some(b) = &response.five_hour {
-        windows.push(UsageWindow { label: "5 小时".into(), used: b.utilization, resets_at: parse_iso8601(b.resets_at.as_deref()) });
+        windows.push(UsageWindow { label: "5 小时".into(), used: b.utilization, resets_at: parse_iso8601(b.resets_at.as_deref()), recent_rate: None });
         have_session = true;
     }
     if let Some(b) = &response.seven_day {
-        windows.push(UsageWindow { label: "本周".into(), used: b.utilization, resets_at: parse_iso8601(b.resets_at.as_deref()) });
+        windows.push(UsageWindow { label: "本周".into(), used: b.utilization, resets_at: parse_iso8601(b.resets_at.as_deref()), recent_rate: None });
         have_weekly = true;
     }
     let limits = claude_limits::parse(response.limits.as_deref().unwrap_or_default(), &response.extra);
     for limit in &limits {
-        let w = |label: String| UsageWindow { label, used: limit.usage.percentage, resets_at: limit.usage.resets_at };
+        let w = |label: String| UsageWindow { label, used: limit.usage.percentage, resets_at: limit.usage.resets_at, recent_rate: None };
         match (limit.kind.as_str(), limit.model.as_deref()) {
             ("session", None) if !have_session => {
                 windows.insert(0, w("5 小时".into()));

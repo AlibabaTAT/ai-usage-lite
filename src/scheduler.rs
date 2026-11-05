@@ -1,6 +1,7 @@
 //! One worker thread per service. Workers sleep on a channel, so an idle app
 //! uses no CPU between polls, and a slow service never blocks the others.
 
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -92,6 +93,8 @@ fn worker(
     let mut last_attempt: Option<Instant> = None;
     let mut last_ok = true;
     let mut cooldown_until: Option<Instant> = None;
+    // In-memory readings per window, for the recent-rate forecast.
+    let mut history: HashMap<String, crate::forecast::History> = HashMap::new();
     loop {
         let cfg = config.read().map(|c| c.clone()).unwrap_or_default();
         let enabled = cfg.enabled[i];
@@ -106,9 +109,18 @@ fn worker(
                 s[i].in_flight = true;
             }
             notify();
-            let result = std::panic::catch_unwind(AssertUnwindSafe(|| providers::poll(id, mode, &cfg)))
+            let mut result = std::panic::catch_unwind(AssertUnwindSafe(|| providers::poll(id, mode, &cfg)))
                 .unwrap_or_else(|_| Err(Failure::BadResponse));
             let done = SystemTime::now();
+            if let Ok(snap) = result.as_mut() {
+                for pool in &mut snap.pools {
+                    for w in &mut pool.windows {
+                        let key = format!("{}|{}", pool.name, w.label);
+                        let h = history.entry(key).or_default();
+                        w.recent_rate = crate::forecast::record(h, done, w.used, crate::forecast::period_of(&w.label));
+                    }
+                }
+            }
             let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
             failures = if outcome.is_ok() { 0 } else { failures + 1 };
             last_ok = outcome.is_ok();
