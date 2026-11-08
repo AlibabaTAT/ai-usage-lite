@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage-lite"
-version = "0.3.4"
+version = "0.4.5"
 edition = "2021"
 license = "MIT"
 description = "AI Usage Lite - personal tray monitor for Claude / Codex / Antigravity usage limits"
@@ -23,6 +23,7 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",

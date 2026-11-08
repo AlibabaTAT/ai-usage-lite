@@ -251,7 +251,7 @@ fn snapshot_from_summary(summary: SummaryResponse) -> Option<Snapshot> {
             pools.push(Pool { name, windows });
         }
     }
-    Some(Snapshot { pools, source: "Antigravity 登录".into() })
+    Some(Snapshot { pools, source: "Antigravity 登录".into(), balance: None })
 }
 
 fn snapshot_from_models(models: &ModelsResponse) -> Option<Snapshot> {
@@ -265,7 +265,7 @@ fn snapshot_from_models(models: &ModelsResponse) -> Option<Snapshot> {
             Some(UsageWindow { label: "当前".into(), used: (1.0 - rem) * 100.0, resets_at: parse_iso8601(q.reset_time.as_deref()), recent_rate: None })
         })
         .min_by(|a, b| b.used.total_cmp(&a.used))?;
-    Some(Snapshot { pools: vec![Pool { name: "Gemini".into(), windows: vec![best] }], source: "Antigravity 登录（模型额度）".into() })
+    Some(Snapshot { pools: vec![Pool { name: "Gemini".into(), windows: vec![best] }], source: "Antigravity 登录（模型额度）".into(), balance: None })
 }
 
 fn refresh(refresh_token: &str) -> Result<String, Failure> {

@@ -99,7 +99,8 @@ pub fn render(w: i32, h: i32, scale: f32, progress: f32, right: bool, bars: &[Ba
 
     let n = bars.len().max(1) as f32;
     let bar_w = 3.6 * scale;
-    let bar_gap = 3.2 * scale;
+    // Four bars (DeepSeek added) still need a margin inside the 30 px capsule.
+    let bar_gap = if bars.len() >= 4 { 2.4 } else { 3.2 } * scale;
     let total = bar_w * n + bar_gap * (n - 1.0);
     let bx0 = (x0 + x1) / 2.0 - total / 2.0;
     let by0 = y0 + 15.0 * scale;

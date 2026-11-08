@@ -34,6 +34,9 @@ pub fn brand_rgb(id: crate::model::ProviderId, dark_bg: bool) -> [f32; 3] {
         // Google blue #4285F4 (Antigravity publishes no colour of its own).
         (Antigravity, true) => [102.0, 157.0, 246.0],
         (Antigravity, false) => [66.0, 133.0, 244.0],
+        // DeepSeek blue #4D6BFE.
+        (DeepSeek, true) => [112.0, 136.0, 255.0],
+        (DeepSeek, false) => [77.0, 107.0, 254.0],
     }
 }
 
@@ -55,9 +58,13 @@ pub fn render(size: i32, bars: &[Bar], taskbar_dark: bool) -> Vec<u8> {
     let n = bars.len().max(1) as f32;
     let fg = if taskbar_dark { rgba(0xFFFFFF) } else { rgba(0x1B1B1B) };
     let danger = danger_rgb(taskbar_dark);
-    // Geometry scaled from a 16 px design: bars 3 px wide, 2 px apart.
-    let bar_w = (s * 0.19).max(2.5);
-    let gap = (s * 0.11).max(1.5);
+    // Geometry scaled from a 16 px design: bars 3 px wide, 2 px apart;
+    // four bars (all services on) get slimmer so they still fit.
+    let (bar_w, gap) = if bars.len() >= 4 {
+        ((s * 0.15).max(2.0), (s * 0.08).max(1.0))
+    } else {
+        ((s * 0.19).max(2.5), (s * 0.11).max(1.5))
+    };
     let total = bar_w * n + gap * (n - 1.0);
     let x0 = (s - total) / 2.0;
     let top = s * 0.12;
@@ -230,6 +237,19 @@ mod tests {
         assert_eq!(at(7, 11), 255);
         assert!(at(7, 4) > 30 && at(7, 4) < 120);
         assert_eq!(at(0, 0), 0);
+    }
+
+    #[test]
+    fn four_bars_fit_inside_the_icon() {
+        use crate::model::ProviderId::*;
+        for size in [16, 20, 24, 32] {
+            let bars: Vec<Bar> = [Claude, Codex, Antigravity, DeepSeek].into_iter().map(|id| Bar { id, value: Some(100.0) }).collect();
+            let px = render(size, &bars, true);
+            let at = |x: i32, y: i32| px[((y * size + x) * 4 + 3) as usize];
+            let mid = size / 2;
+            assert_eq!(at(0, mid), 0, "left edge clear at {size}");
+            assert_eq!(at(size - 1, mid), 0, "right edge clear at {size}");
+        }
     }
 }
 

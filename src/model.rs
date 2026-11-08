@@ -7,10 +7,13 @@ pub enum ProviderId {
     Claude,
     Codex,
     Antigravity,
+    DeepSeek,
 }
 
+pub const PROVIDER_COUNT: usize = 4;
+
 impl ProviderId {
-    pub const ALL: [ProviderId; 3] = [ProviderId::Claude, ProviderId::Codex, ProviderId::Antigravity];
+    pub const ALL: [ProviderId; PROVIDER_COUNT] = [ProviderId::Claude, ProviderId::Codex, ProviderId::Antigravity, ProviderId::DeepSeek];
 
     pub fn index(self) -> usize {
         self as usize
@@ -21,7 +24,13 @@ impl ProviderId {
             ProviderId::Claude => "Claude",
             ProviderId::Codex => "Codex",
             ProviderId::Antigravity => "Antigravity",
+            ProviderId::DeepSeek => "DeepSeek",
         }
+    }
+
+    /// Services measured as a share of a limit (DeepSeek is a money balance).
+    pub fn is_percent(self) -> bool {
+        self != ProviderId::DeepSeek
     }
 }
 
@@ -54,11 +63,31 @@ pub struct Pool {
     pub windows: Vec<UsageWindow>,
 }
 
+/// Prepaid account balance (DeepSeek).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Balance {
+    pub currency: String,
+    pub total: f64,
+    pub granted: f64,
+    pub topped_up: f64,
+    /// The service says the balance is enough to make API calls.
+    pub available: bool,
+    /// Spending inferred from earlier readings. Filled in by the scheduler.
+    pub spend: Option<crate::spend::Spend>,
+}
+
+impl Balance {
+    pub fn symbol(&self) -> &'static str {
+        if self.currency == "USD" { "$" } else { "¥" }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub pools: Vec<Pool>,
     /// Where the login came from, e.g. "Claude 桌面版登录". Never a secret.
     pub source: String,
+    pub balance: Option<Balance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -99,7 +128,15 @@ impl Failure {
             ProviderId::Claude => "Claude 桌面版或 Claude Code",
             ProviderId::Codex => "Codex",
             ProviderId::Antigravity => "Antigravity",
+            ProviderId::DeepSeek => "DeepSeek",
         };
+        if provider == ProviderId::DeepSeek {
+            match self {
+                Failure::NoCredentials => return "运行“设置DeepSeek密钥.cmd”保存 API Key".into(),
+                Failure::TokenExpired | Failure::AuthRejected(_) => return "API Key 无效，请重新设置".into(),
+                _ => {}
+            }
+        }
         match self {
             Failure::NoCredentials => format!("请先在 {app} 中登录"),
             Failure::TokenExpired => format!("打开 {app} 用一下即可自动续期"),

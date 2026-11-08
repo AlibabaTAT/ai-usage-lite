@@ -48,7 +48,33 @@ pub fn local(t: SystemTime) -> Local {
     }
 }
 
-#[allow(dead_code)]
+/// Local time with offset, e.g. "2026-11-08T09:05:30+08:00" (for the usage log).
+pub fn iso(t: SystemTime) -> String {
+    let l = local(t);
+    let unix = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let sec = unix.rem_euclid(60);
+    let local_secs = l.day_index * 86_400 + i64::from(l.hour) * 3600 + i64::from(l.minute) * 60 + sec;
+    let off_min = (local_secs - unix) / 60;
+    let (y, _, _) = civil_from_days(l.day_index);
+    let sign = if off_min < 0 { '-' } else { '+' };
+    format!(
+        "{y:04}-{:02}-{:02}T{:02}:{:02}:{sec:02}{sign}{:02}:{:02}",
+        l.month,
+        l.day,
+        l.hour,
+        l.minute,
+        off_min.abs() / 60,
+        off_min.abs() % 60
+    )
+}
+
+/// "2026-11" for the month containing `t`, local time.
+pub fn year_month(t: SystemTime) -> String {
+    let l = local(t);
+    let (y, m, _) = civil_from_days(l.day_index);
+    format!("{y:04}-{m:02}")
+}
+
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);

@@ -146,7 +146,7 @@ fn snapshot_from(response: UsageResponse) -> Option<Snapshot> {
     if windows.iter().all(|w| w.label != "本周") {
         windows.extend(monthly);
     }
-    Some(Snapshot { pools: vec![Pool { name: String::new(), windows }], source: "Codex 登录".into() })
+    Some(Snapshot { pools: vec![Pool { name: String::new(), windows }], source: "Codex 登录".into(), balance: None })
 }
 
 fn now_secs() -> i64 {

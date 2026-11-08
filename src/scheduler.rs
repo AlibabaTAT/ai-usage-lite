@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::model::{Failure, ProviderId, ProviderState};
 use crate::providers::{self, Mode};
 
-pub type States = Arc<Mutex<[ProviderState; 3]>>;
+pub type States = Arc<Mutex<[ProviderState; crate::model::PROVIDER_COUNT]>>;
 pub type SharedConfig = Arc<RwLock<Config>>;
 
 pub enum Cmd {
@@ -95,9 +95,11 @@ fn worker(
     let mut cooldown_until: Option<Instant> = None;
     // In-memory readings per window, for the recent-rate forecast.
     let mut history: HashMap<String, crate::forecast::History> = HashMap::new();
+    // Balance readings (DeepSeek), loaded from disk on first use.
+    let mut spend_history: Option<crate::spend::History> = None;
     loop {
         let cfg = config.read().map(|c| c.clone()).unwrap_or_default();
-        let enabled = cfg.enabled[i];
+        let enabled = cfg.enabled.get(i).copied().unwrap_or(false);
         if enabled && !was_enabled {
             next_due = Instant::now();
         }
@@ -119,6 +121,18 @@ fn worker(
                         let h = history.entry(key).or_default();
                         w.recent_rate = crate::forecast::record(h, done, w.used, crate::forecast::period_of(&w.label));
                     }
+                }
+                // DeepSeek: infer spending from the stored balance readings.
+                // Demo modes never touch the file.
+                if mode == Mode::Live {
+                    if let Some(b) = snap.balance.as_mut() {
+                        let h = spend_history.get_or_insert_with(crate::spend::load);
+                        let now = crate::spend::unix(done);
+                        h.record(now, &b.currency, b.total);
+                        b.spend = Some(h.spend(now, crate::spend::local_midnight(done), b.total));
+                        crate::spend::save(h);
+                    }
+                    crate::usagelog::record(&cfg, id, snap, done);
                 }
             }
             let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);

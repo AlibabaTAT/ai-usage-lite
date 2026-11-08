@@ -12,7 +12,9 @@ use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, Lo
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_F5};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_END, VK_ESCAPE, VK_F5, VK_HOME, VK_NEXT, VK_PRIOR, VK_UP,
+};
 use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,8 +37,21 @@ static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
 pub const WM_APP_TRAY: u32 = WM_APP + 1;
 pub const WM_APP_UPDATE: u32 = WM_APP + 2;
 pub const WM_APP_SHOW: u32 = WM_APP + 3;
+/// A newer copy was started: wparam = its version. Reply 1 = this copy
+/// exits for it, 2 = keep this copy (same or newer).
+pub const WM_APP_HANDOFF: u32 = WM_APP + 4;
+
+/// Version as one comparable number (major, minor, patch).
+pub fn version_code() -> usize {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.').map(|p| p.parse::<usize>().unwrap_or(0));
+    let (a, b, c) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (a << 16) | (b << 8) | c
+}
 const TIMER_TICK: usize = 1;
 const TIMER_RESUME: usize = 2;
+const TIMER_BAR: usize = 3;
+/// Scroll distance per wheel notch, in DIPs (about three text lines).
+const WHEEL_STEP: f32 = 60.0;
 const MENU_REFRESH: usize = 1;
 const MENU_SETTINGS: usize = 2;
 const MENU_QUIT: usize = 3;
@@ -68,6 +83,17 @@ struct App {
     dock: Option<Dock>,
     /// The panel was opened from the floating strip (positions it beside it).
     from_dock: bool,
+    /// Body scroll offset and full content height, in DIPs.
+    scroll: f32,
+    content_h: f32,
+    /// The thin scroll indicator stays visible until this moment.
+    bar_until: Instant,
+    /// Cursor is over the scroll bar band.
+    bar_hot: bool,
+    /// Thumb drag: (cursor y at press, scroll at press), DIPs.
+    bar_drag: Option<(f32, f32)>,
+    /// The press went to the scroll bar, so the release is not a click.
+    bar_pressed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +115,7 @@ impl App {
         self.config.read().map(|c| c.clone()).unwrap_or_default()
     }
 
-    fn snapshot_states(&self) -> [ProviderState; 3] {
+    fn snapshot_states(&self) -> [ProviderState; crate::model::PROVIDER_COUNT] {
         self.states.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
@@ -102,6 +128,9 @@ impl App {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
         });
         self.scheduler = Some(Scheduler::start(self.mode, self.states.clone(), self.config.clone(), notify));
+        super::launch::preload_icons(move || unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
+        });
     }
 
     fn layout_height(&self) -> f32 {
@@ -115,8 +144,76 @@ impl App {
             demo: self.mode != Mode::Live,
             page: self.page,
             hover: None,
+            scroll: 0.0,
+            viewport: f32::INFINITY,
+            bar: view::Bar::Hidden,
         };
         view::draw(&Painter { gfx: &self.gfx, target: None }, &input).height
+    }
+
+    fn viewport(&self) -> f32 {
+        self.size_px.1 as f32 / self.scale()
+    }
+
+    fn max_scroll(&self) -> f32 {
+        if view::scrolls(self.page) { (self.content_h - self.viewport()).max(0.0) } else { 0.0 }
+    }
+
+    fn bar_state(&self) -> view::Bar {
+        if self.max_scroll() <= 0.0 {
+            view::Bar::Hidden
+        } else if self.bar_drag.is_some() || self.bar_hot {
+            view::Bar::Expanded
+        } else if Instant::now() < self.bar_until {
+            view::Bar::Indicator
+        } else {
+            view::Bar::Hidden
+        }
+    }
+
+    /// Shows the thin indicator for a moment (after wheel or mouse movement).
+    fn poke_bar(&mut self) {
+        if self.max_scroll() <= 0.0 {
+            return;
+        }
+        let was = self.bar_state();
+        self.bar_until = Instant::now() + std::time::Duration::from_millis(1200);
+        unsafe {
+            SetTimer(Some(self.hwnd), TIMER_BAR, 1300, None);
+            if was == view::Bar::Hidden {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+    }
+
+    fn scroll_to(&mut self, y: f32) {
+        let y = y.clamp(0.0, self.max_scroll()).round();
+        if (y - self.scroll).abs() < 0.5 {
+            return;
+        }
+        self.scroll = y;
+        self.poke_bar();
+        // Content moved under a still cursor: refresh the hover target.
+        self.paint();
+        let mut pt = cursor_pos();
+        unsafe {
+            let _ = ScreenToClient(self.hwnd, &mut pt);
+        }
+        let s = self.scale();
+        let hover = self.hit_xy(pt.x as f32 / s, pt.y as f32 / s);
+        self.hover = hover;
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// Full content height in pixels, capped to the work area.
+    fn measure_px(&mut self, max_h: i32) -> i32 {
+        self.content_h = self.layout_height();
+        let h = ((self.content_h * self.scale()).round() as i32).min(max_h);
+        let viewport = h as f32 / self.scale();
+        self.scroll = self.scroll.clamp(0.0, (self.content_h - viewport).max(0.0));
+        h
     }
 
     fn paint(&mut self) {
@@ -131,6 +228,9 @@ impl App {
             demo: self.mode != Mode::Live,
             page: self.page,
             hover: self.hover.as_ref(),
+            scroll: self.scroll,
+            viewport: self.viewport(),
+            bar: self.bar_state(),
         };
         unsafe { target.rt.BeginDraw() };
         let out = view::draw(&Painter { gfx: &self.gfx, target: Some(target) }, &input);
@@ -182,11 +282,12 @@ impl App {
         self.page = page;
         self.hover = None;
         self.from_dock = false;
+        self.scroll = 0.0;
         let s = self.scale();
         let margin = (MARGIN_DIP * s).round() as i32;
         let w = (view::page_width(page) * s).round() as i32;
         let max_h = (work.bottom - work.top) - 2 * margin;
-        let h = ((self.layout_height() * s).round() as i32).min(max_h);
+        let h = self.measure_px(max_h);
         // Taskbar edge: wherever the work area is inset from the monitor.
         let x = match icon {
             Some(r) => ((r.left + r.right) / 2 - w / 2).min(work.right - w - margin).max(work.left + margin),
@@ -215,12 +316,13 @@ impl App {
         self.page = page;
         self.hover = None;
         self.from_dock = true;
+        self.scroll = 0.0;
         let s = self.scale();
         let margin = (MARGIN_DIP * s).round() as i32;
         let gap = (8.0 * s).round() as i32;
         let w = (view::page_width(page) * s).round() as i32;
         let max_h = (work.bottom - work.top) - 2 * margin;
-        let h = ((self.layout_height() * s).round() as i32).min(max_h);
+        let h = self.measure_px(max_h);
         let x = if right { cap.left - gap - w } else { cap.right + gap };
         let y = (center.y - h / 2).min(work.bottom - margin - h).max(work.top + margin);
         self.present(x, y, w, h, Anchor::Top(y));
@@ -285,8 +387,10 @@ impl App {
         let s = self.scale();
         let (work, _, _, _) = self.work_area();
         let max_h = (work.bottom - work.top) - 2 * (MARGIN_DIP * s).round() as i32;
-        let h = ((self.layout_height() * s).round() as i32).min(max_h);
-        if h != self.size_px.1 {
+        let h = self.measure_px(max_h);
+        if h == self.size_px.1 {
+            // Same window, different content height: keep the offset valid.
+        } else {
             let mut rc = RECT::default();
             unsafe {
                 let _ = GetWindowRect(self.hwnd, &mut rc);
@@ -320,6 +424,15 @@ impl App {
     }
 
     fn handle(&mut self, action: Action) {
+        let before = self.page;
+        self.handle_inner(action);
+        if self.page != before {
+            self.scroll = 0.0;
+            self.hover = None;
+        }
+    }
+
+    fn handle_inner(&mut self, action: Action) {
         match action {
             Action::Refresh => {
                 if let Some(s) = &self.scheduler {
@@ -331,6 +444,7 @@ impl App {
             Action::Back => self.page = Page::Main,
             Action::ToggleProvider(i) => {
                 self.update_config(|c| c.enabled[i] = !c.enabled[i]);
+
                 if let Some(s) = &self.scheduler {
                     s.reconfigure();
                 }
@@ -389,16 +503,37 @@ impl App {
         self.relayout();
     }
 
-    fn tray_state(&self) -> (Vec<Bar>, String) {
+    /// Usage bars, tooltip, and the DeepSeek bar (balance against ¥100),
+    /// which the tray icon and the floating strip append last.
+    fn tray_state(&self) -> (Vec<Bar>, String, Option<Bar>) {
         let cfg = self.cfg();
         let states = self.snapshot_states();
         let mut bars = Vec::new();
         let mut lines = Vec::new();
+        let mut money_bar = None;
         for id in ProviderId::ALL {
-            if !cfg.enabled[id.index()] {
+            if !cfg.is_enabled(id) {
                 continue;
             }
             let st = &states[id.index()];
+            // DeepSeek is a money balance: tooltip line, and a strip bar only.
+            if !id.is_percent() {
+                let bal = st.last_ok.as_ref().and_then(|(_, s)| s.balance.as_ref());
+                let err = st.current_error();
+                let value = if err.is_some_and(|e| !e.is_transient()) {
+                    None
+                } else {
+                    // Calls failing ("余额不足") or below the low mark both read as nearly out.
+                    bal.map(|b| if !b.available { 0.0 } else if b.total < cfg.deepseek_low_balance { b.total.min(tray::DANGER_BELOW - 0.01) } else { b.total.clamp(0.0, 100.0).max(tray::DANGER_BELOW) })
+                };
+                money_bar = Some(Bar { id, value });
+                lines.push(match (st.current_error(), bal) {
+                    (Some(e), None) => format!("{} {}", id.name(), e.title()),
+                    (_, Some(b)) => format!("{} 余额 {}{:.2}", id.name(), b.symbol(), b.total),
+                    _ => format!("{} 等待查询", id.name()),
+                });
+                continue;
+            }
             let windows: Vec<_> = st
                 .last_ok
                 .iter()
@@ -425,11 +560,12 @@ impl App {
             lines.push(line);
         }
         let head = if self.mode == Mode::Live { "AI 额度" } else { "AI 额度（演示）" };
-        (bars, format!("{head}\n{}", lines.join("\n")))
+        (bars, format!("{head}\n{}", lines.join("\n")), money_bar)
     }
 
     fn refresh_tray(&mut self, add: bool) {
-        let (bars, tip) = self.tray_state();
+        let (mut bars, tip, money) = self.tray_state();
+        bars.extend(money);
         let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) };
         let Ok(icon) = tray::make_icon(size.max(16), &bars, self.taskbar_dark) else { return };
         if add {
@@ -495,9 +631,46 @@ impl App {
     }
 
     fn hit_at(&self, lparam: LPARAM) -> Option<Action> {
+        let (x, y) = self.dip_xy(lparam);
+        self.hit_xy(x, y)
+    }
+
+    fn dip_xy(&self, lparam: LPARAM) -> (f32, f32) {
         let x = (lparam.0 & 0xffff) as i16 as f32 / self.scale();
         let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32 / self.scale();
+        (x, y)
+    }
+
+    fn hit_xy(&self, x: f32, y: f32) -> Option<Action> {
+        if self.in_bar_band(x, y) {
+            return None;
+        }
         self.hits.iter().rev().find(|(r, _)| r.contains(x, y)).map(|(_, a)| a.clone())
+    }
+
+    fn in_bar_band(&self, x: f32, y: f32) -> bool {
+        self.max_scroll() > 0.0 && x >= view::page_width(self.page) - view::BAR_BAND && y >= view::HEADER_H
+    }
+
+    /// Press on the scroll bar: drag the thumb, or page towards the click.
+    fn bar_press(&mut self, y: f32) {
+        let ((_, _), (ty, th)) = view::thumb(self.content_h, self.viewport(), self.scroll);
+        if y >= ty && y <= ty + th {
+            self.bar_drag = Some((y, self.scroll));
+            unsafe { SetCapture(self.hwnd) };
+            let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+        } else {
+            let page = self.viewport() - view::HEADER_H - 40.0;
+            let target = if y < ty { self.scroll - page } else { self.scroll + page };
+            self.scroll_to(target);
+        }
+    }
+
+    fn bar_drag_to(&mut self, y: f32) {
+        let Some((y0, s0)) = self.bar_drag else { return };
+        let ((_, track), (_, th)) = view::thumb(self.content_h, self.viewport(), self.scroll);
+        let ratio = self.max_scroll() / (track - th).max(1.0);
+        self.scroll_to(s0 + (y - y0) * ratio);
     }
 }
 
@@ -585,7 +758,8 @@ impl App {
         if d.hidden_for_fullscreen {
             return;
         }
-        let (bars, _) = self.tray_state();
+        let (mut bars, _, money) = self.tray_state();
+        bars.extend(money);
         d.paint(&bars, self.dark);
     }
 
@@ -865,14 +1039,52 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                if wparam.0 as u16 == VK_ESCAPE.0 {
+                let key = wparam.0 as u16;
+                let page = app.viewport() - view::HEADER_H - 40.0;
+                if key == VK_ESCAPE.0 {
                     app.hide();
-                } else if wparam.0 as u16 == VK_F5.0 {
+                } else if key == VK_F5.0 {
                     app.handle(Action::Refresh);
+                } else if key == VK_NEXT.0 {
+                    app.scroll_to(app.scroll + page);
+                } else if key == VK_PRIOR.0 {
+                    app.scroll_to(app.scroll - page);
+                } else if key == VK_DOWN.0 {
+                    app.scroll_to(app.scroll + WHEEL_STEP / 1.5);
+                } else if key == VK_UP.0 {
+                    app.scroll_to(app.scroll - WHEEL_STEP / 1.5);
+                } else if key == VK_HOME.0 {
+                    app.scroll_to(0.0);
+                } else if key == VK_END.0 {
+                    app.scroll_to(f32::MAX);
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as f32 / 120.0;
+                app.scroll_to(app.scroll - delta * WHEEL_STEP);
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = app.dip_xy(lparam);
+                app.bar_pressed = app.in_bar_band(x, y);
+                if app.bar_pressed {
+                    app.bar_press(y);
                 }
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
+                let (x, y) = app.dip_xy(lparam);
+                if app.bar_drag.is_some() {
+                    app.bar_drag_to(y);
+                    return LRESULT(0);
+                }
+                let hot = app.in_bar_band(x, y);
+                if hot != app.bar_hot {
+                    app.bar_hot = hot;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                app.poke_bar();
                 if !app.tracking {
                     let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut tme);
@@ -887,12 +1099,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_MOUSELEAVE => {
                 app.tracking = false;
+                if app.bar_hot && app.bar_drag.is_none() {
+                    app.bar_hot = false;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
                 if app.hover.take().is_some() {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                if app.bar_drag.take().is_some() {
+                    let _ = ReleaseCapture();
+                    let (x, y) = app.dip_xy(lparam);
+                    app.bar_hot = app.in_bar_band(x, y);
+                    app.poke_bar();
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                }
+                if std::mem::take(&mut app.bar_pressed) {
+                    return LRESULT(0);
+                }
                 if let Some(a) = app.hit_at(lparam) {
                     app.handle(a);
                 }
@@ -900,6 +1127,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_TIMER => {
                 match wparam.0 {
+                    TIMER_BAR => {
+                        if Instant::now() >= app.bar_until && !app.bar_hot && app.bar_drag.is_none() {
+                            let _ = KillTimer(Some(hwnd), TIMER_BAR);
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    }
                     TIMER_TICK => {
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     }
@@ -931,6 +1164,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_APP_UPDATE => {
                 app.on_data();
                 LRESULT(0)
+            }
+            WM_APP_HANDOFF => {
+                if wparam.0 > version_code() {
+                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    LRESULT(1)
+                } else {
+                    LRESULT(2)
+                }
             }
             WM_APP_SHOW => {
                 if !app.visible {
@@ -1025,6 +1266,12 @@ pub fn run(mode: Mode) -> Result<()> {
             target: None,
             page: Page::Main,
             hits: Vec::new(),
+            scroll: 0.0,
+            content_h: 0.0,
+            bar_until: Instant::now(),
+            bar_hot: false,
+            bar_drag: None,
+            bar_pressed: false,
             hover: None,
             visible: false,
             last_hide: Instant::now() - std::time::Duration::from_secs(5),

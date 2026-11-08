@@ -187,7 +187,7 @@ fn snapshot_from(response: UsageResponse) -> Snapshot {
             (kind, _) => diag::log(format!("Claude: 忽略额度项 {kind}")),
         }
     }
-    Snapshot { pools: vec![Pool { name: String::new(), windows }], source: String::new() }
+    Snapshot { pools: vec![Pool { name: String::new(), windows }], source: String::new(), balance: None }
 }
 
 #[cfg(test)]

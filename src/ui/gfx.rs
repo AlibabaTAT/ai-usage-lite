@@ -191,7 +191,7 @@ impl Gfx {
             let rt = self.d2d.CreateHwndRenderTarget(&props, &hwnd_props)?;
             rt.SetDpi(dpi, dpi);
             let brush = rt.CreateSolidColorBrush(&Color(0.0, 0.0, 0.0, 1.0).d2d(), None)?;
-            Ok(Target { rt, brush })
+            Ok(Target { rt, brush, images: RefCell::new(HashMap::new()) })
         }
     }
 }
@@ -199,6 +199,8 @@ impl Gfx {
 pub struct Target {
     pub rt: ID2D1HwndRenderTarget,
     brush: ID2D1SolidColorBrush,
+    /// Device bitmaps for app icons, keyed by the source's address.
+    images: RefCell<HashMap<usize, ID2D1Bitmap>>,
 }
 
 impl Target {
@@ -222,6 +224,34 @@ impl Painter<'_> {
         let t = self.target?;
         unsafe { t.brush.SetColor(&c.d2d()) };
         Some(&t.brush)
+    }
+
+    /// Draws a premultiplied BGRA square image scaled into `r`.
+    pub fn image(&self, img: &crate::ui::launch::AppIcon, r: Rect) {
+        let Some(t) = self.target else { return };
+        let key = img as *const _ as usize;
+        let mut cache = t.images.borrow_mut();
+        if !cache.contains_key(&key) {
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+            };
+            let size = D2D_SIZE_U { width: img.px, height: img.px };
+            let Ok(bmp) = (unsafe { t.rt.CreateBitmap(size, Some(img.bgra.as_ptr() as *const _), img.px * 4, &props) }) else { return };
+            cache.insert(key, bmp);
+        }
+        if let Some(bmp) = cache.get(&key) {
+            unsafe { t.rt.DrawBitmap(bmp, Some(&r.d2d()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+        }
+    }
+
+    /// Shifts everything drawn afterwards up by `dy` (scrolling).
+    pub fn set_offset(&self, dy: f32) {
+        if let Some(t) = self.target {
+            let m = windows_numerics::Matrix3x2::translation(0.0, -dy);
+            unsafe { t.rt.SetTransform(&m) };
+        }
     }
 
     pub fn clear(&self, c: Color) {

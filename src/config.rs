@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    /// Claude, Codex, Antigravity.
-    pub enabled: [bool; 3],
+    /// Claude, Codex, Antigravity, DeepSeek. A list so older files with
+    /// fewer services still load.
+    pub enabled: Vec<bool>,
+    /// DeepSeek balance below this many yuan shows in red.
+    pub deepseek_low_balance: f64,
     pub refresh_minutes: u32,
     /// Bars and numbers show used share instead of remaining share.
     pub show_used: bool,
@@ -29,12 +32,30 @@ pub struct Config {
     pub dock_anchor: Option<(i32, i32)>,
     /// Show the burn-rate forecast under each window.
     pub forecast: bool,
+    /// Append changed readings to the long-term usage log.
+    pub usage_log: bool,
+    /// Folder of the usage log; empty = %LOCALAPPDATA%\AI-Usage-Lite\usage-log.
+    pub usage_log_dir: Option<String>,
+    /// Monthly subscription fees, copied into the log for later reports.
+    pub subscriptions: Vec<Subscription>,
+    /// Exchange rate the user wants reports to use (not fetched online).
+    pub usd_to_cny: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Subscription {
+    pub service: String,
+    pub plan: String,
+    pub monthly_fee: f64,
+    pub currency: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            enabled: [true, true, true],
+            // Padded to every service by `load` (DeepSeek on only with a key).
+            enabled: vec![true, true, true],
+            deepseek_low_balance: 10.0,
             refresh_minutes: 5,
             show_used: false,
             compact: false,
@@ -47,6 +68,10 @@ impl Default for Config {
             dock_y: 0.62,
             dock_anchor: None,
             forecast: true,
+            usage_log: true,
+            usage_log_dir: None,
+            subscriptions: Vec::new(),
+            usd_to_cny: None,
         }
     }
 }
@@ -54,6 +79,9 @@ impl Default for Config {
 pub const REFRESH_CHOICES: [u32; 5] = [2, 5, 10, 15, 30];
 
 impl Config {
+    pub fn is_enabled(&self, id: crate::model::ProviderId) -> bool {
+        self.enabled.get(id.index()).copied().unwrap_or(false)
+    }
     pub fn load() -> Config {
         let Some(path) = crate::paths::config_dir().map(|d| d.join("config.json")) else {
             return Config::default();
@@ -64,6 +92,12 @@ impl Config {
             .or_else(|| legacy.and_then(|l| std::fs::read_to_string(l).ok()))
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        // Services added after the file was written: Claude/Codex/Antigravity
+        // default on; DeepSeek only if an API key is already configured.
+        while cfg.enabled.len() < crate::model::PROVIDER_COUNT {
+            let idx = cfg.enabled.len();
+            cfg.enabled.push(if idx == crate::model::ProviderId::DeepSeek.index() { crate::providers::deepseek::key_present() } else { true });
+        }
         if !REFRESH_CHOICES.contains(&cfg.refresh_minutes) {
             cfg.refresh_minutes = 5;
         }

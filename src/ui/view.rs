@@ -7,7 +7,7 @@ use super::fmt;
 use super::gfx::{font, icon_font, Align, Color, Font, Painter, Rect, REGULAR, SEMIBOLD};
 use super::theme::Palette;
 use crate::config::{Config, REFRESH_CHOICES};
-use crate::model::{Failure, ProviderId, ProviderState, UsageWindow};
+use crate::model::{Balance, Failure, ProviderId, ProviderState, UsageWindow};
 
 pub const WIDTH: f32 = 360.0;
 pub const MINI_WIDTH: f32 = 252.0;
@@ -50,11 +50,43 @@ pub enum Page {
 pub struct Input<'a> {
     pub pal: &'a Palette,
     pub cfg: &'a Config,
-    pub states: &'a [ProviderState; 3],
+    pub states: &'a [ProviderState; crate::model::PROVIDER_COUNT],
     pub now: SystemTime,
     pub demo: bool,
     pub page: Page,
     pub hover: Option<&'a Action>,
+    /// Scroll position of the body and visible height, in DIPs.
+    pub scroll: f32,
+    pub viewport: f32,
+    pub bar: Bar,
+}
+
+/// Overlay scroll bar state (WinUI style): hidden, a thin panning
+/// indicator, or the full thumb while the cursor is over it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bar {
+    Hidden,
+    Indicator,
+    Expanded,
+}
+
+/// Pinned header height of the scrollable pages.
+pub const HEADER_H: f32 = 48.0;
+/// Width of the scroll bar band at the right edge.
+pub const BAR_BAND: f32 = 14.0;
+
+pub fn scrolls(page: Page) -> bool {
+    page != Page::Mini
+}
+
+/// Scroll bar track (top, height) and thumb (top, height).
+pub fn thumb(content: f32, viewport: f32, scroll: f32) -> ((f32, f32), (f32, f32)) {
+    let top = HEADER_H + 2.0;
+    let track = (viewport - top - 6.0).max(1.0);
+    let max = (content - viewport).max(1.0);
+    let h = (track * viewport / content.max(1.0)).clamp(28.0f32.min(track), track);
+    let y = top + (track - h) * (scroll / max).clamp(0.0, 1.0);
+    ((top, track), (y, h))
 }
 
 pub struct Output {
@@ -132,12 +164,18 @@ impl Ctx<'_, '_> {
     }
 
     fn tile(&self, x: f32, y: f32, size: f32, id: ProviderId) {
+        // An icon the user put in %APPDATA%\AI-Usage-Lite\icons replaces the tile.
+        if let Some(icon) = crate::ui::launch::custom_icon(id) {
+            self.p.image(icon, Rect::new(x, y, size, size));
+            return;
+        }
         let pal = self.pal();
         let white = Color::hex(0xFFFFFF);
         let bg = match id {
             ProviderId::Claude => Color::hex(0xC8694A),
             ProviderId::Codex => if pal.dark { Color::hex(0x3B3B3B) } else { Color::hex(0x2A2A2A) },
             ProviderId::Antigravity => Color::hex(0x4874D6),
+            ProviderId::DeepSeek => Color::hex(0x4D6BFE),
         };
         self.p.fill_round(Rect::new(x, y, size, size), size * 0.26, bg);
         let (cx, cy) = (x + size / 2.0, y + size / 2.0);
@@ -168,6 +206,10 @@ impl Ctx<'_, '_> {
             ProviderId::Antigravity => {
                 self.p.stroke_poly(&[(cx - 7.0 * s, cy + 6.0 * s), (cx, cy - 7.0 * s), (cx + 7.0 * s, cy + 6.0 * s)], white, 2.2 * s);
                 self.p.line(cx - 3.2 * s, cy + 1.5 * s, cx + 3.2 * s, cy + 1.5 * s, white, 1.6 * s);
+            }
+            // DeepSeek blue tile with initials (generic, not the logo).
+            ProviderId::DeepSeek => {
+                self.p.text("DS", Rect::new(x, y, size, size), font(12.0 * s, SEMIBOLD, Align::Center), white);
             }
         }
     }
@@ -223,6 +265,64 @@ fn exhaust_text(d: Duration) -> String {
 
 const FORECAST_LINE_H: f32 = 17.0;
 
+fn money(b: &Balance, v: f64) -> String {
+    format!("{}{:.2}", b.symbol(), v)
+}
+
+/// Low balance (or the service says calls would fail) shows in red.
+fn balance_low(cfg: &Config, b: &Balance) -> bool {
+    !b.available || b.total < cfg.deepseek_low_balance
+}
+
+const UNAVAILABLE: &str = "余额不足，API 暂不可用";
+/// The DeepSeek balance bar is full at ¥100.
+const BALANCE_FULL: f64 = 100.0;
+
+/// "约 23天10小时后用完" / "可用 3 个月以上", from the projected days left.
+fn days_text(days: f64) -> String {
+    if days > crate::spend::MAX_DAYS {
+        "可用 3 个月以上".into()
+    } else {
+        exhaust_text(Duration::from_secs_f64((days * 86_400.0).max(60.0)))
+    }
+}
+
+/// Days-left projection, when forecasts are on and the data is live.
+fn balance_days(i: &Input, b: &Balance, dim: bool) -> Option<f64> {
+    if !i.cfg.forecast || dim {
+        return None;
+    }
+    b.spend?.days_left
+}
+
+/// "今日已用 ¥1.26", shown on the balance line where the reset time would be.
+fn today_text(b: &Balance, dim: bool) -> Option<String> {
+    if dim {
+        return None;
+    }
+    Some(format!("今日已用 {}", money(b, b.spend?.today)))
+}
+
+/// Line under the balance, like the forecast under a usage window.
+/// Returns the text and whether it should stand out.
+fn balance_line(i: &Input, b: &Balance, dim: bool) -> Option<(String, bool)> {
+    if !b.available {
+        return Some((UNAVAILABLE.into(), true));
+    }
+    if !i.cfg.forecast || dim {
+        return None;
+    }
+    b.spend?;
+    Some(match balance_days(i, b, dim) {
+        Some(d) => (days_text(d), d < 7.0),
+        None => ("近期无消耗，暂不预估".into(), false),
+    })
+}
+
+fn balance_of(st: &Status) -> Option<&Balance> {
+    st.rows.iter().find_map(|r| if let Row::Balance(b) = r { Some(b) } else { None })
+}
+
 fn stale_after(cfg: &Config) -> Duration {
     Duration::from_secs((u64::from(cfg.refresh_minutes) * 60 * 3).max(20 * 60))
 }
@@ -237,6 +337,7 @@ fn failure_color(pal: &Palette, f: &Failure) -> Color {
 
 enum Row {
     PoolTitle(String),
+    Balance(Balance),
     Win(UsageWindow),
     Message(String, Color),
 }
@@ -271,7 +372,9 @@ fn status_of(i: &Input, id: ProviderId) -> Status {
             }
             rows.extend(pool.windows.iter().cloned().map(Row::Win));
         }
-        if snap.pools.is_empty() {
+        if let Some(b) = &snap.balance {
+            rows.push(Row::Balance(b.clone()));
+        } else if snap.pools.is_empty() {
             rows.push(Row::Message("账号没有返回额度数据".into(), pal.text2));
         } else if pools.is_empty() {
             rows.push(Row::Message("额度池均已隐藏，可在设置中开启".into(), pal.text2));
@@ -302,19 +405,63 @@ fn status_of(i: &Input, id: ProviderId) -> Status {
 pub fn draw(p: &Painter, i: &Input) -> Output {
     let mut c = Ctx { p, i, hits: Vec::new() };
     p.clear(i.pal.bg);
+    let scroll = if scrolls(i.page) { i.scroll.max(0.0) } else { 0.0 };
+    p.set_offset(scroll);
     let height = match i.page {
         Page::Main => main_page(&mut c),
         Page::Settings => settings_page(&mut c),
         Page::Consent => consent_page(&mut c),
         Page::Mini => mini_page(&mut c),
     };
-    Output { height, hits: c.hits }
+    p.set_offset(0.0);
+    if !scrolls(i.page) || height <= i.viewport + 0.5 {
+        return Output { height, hits: c.hits };
+    }
+    let pal = *c.pal();
+    // Hits move with the content; whatever slid under the header is gone.
+    let mut hits: Vec<(Rect, Action)> = Vec::new();
+    for (r, a) in c.hits.drain(..) {
+        let top = (r.y - scroll).max(if scroll > 0.0 { HEADER_H } else { 0.0 });
+        let bottom = (r.bottom() - scroll).min(i.viewport);
+        if bottom > top {
+            hits.push((Rect::new(r.x, top, r.w, bottom - top), a));
+        }
+    }
+    let w = page_width(i.page);
+    // More below: a soft fade into the background.
+    if scroll < height - i.viewport - 0.5 {
+        for k in 0..8 {
+            let y = i.viewport - 28.0 + 3.5 * k as f32;
+            p.fill_round(Rect::new(0.0, y, w, 3.5), 0.0, pal.bg.alpha(0.1 + 0.11 * k as f32));
+        }
+    }
+    // Pinned header with a hairline once content runs under it.
+    if scroll > 0.0 {
+        p.fill_round(Rect::new(0.0, 0.0, w, HEADER_H), 0.0, pal.bg);
+        match i.page {
+            Page::Main => main_header(&mut c),
+            Page::Settings => settings_header(&mut c),
+            Page::Consent => consent_header(&mut c),
+            Page::Mini => {}
+        }
+        p.line(0.0, HEADER_H - 0.5, w, HEADER_H - 0.5, pal.divider, 1.0);
+        hits.extend(c.hits.drain(..));
+    }
+    let ((ty, th), (y, h)) = thumb(height, i.viewport, scroll);
+    match i.bar {
+        Bar::Hidden => {}
+        Bar::Indicator => p.fill_round(Rect::new(w - 5.0, y, 2.0, h), 1.0, pal.text3.alpha(0.7)),
+        Bar::Expanded => {
+            p.fill_round(Rect::new(w - BAR_BAND + 2.0, ty - 2.0, BAR_BAND - 4.0, th + 4.0), 5.0, pal.track.alpha(0.9));
+            p.fill_round(Rect::new(w - 10.0, y, 6.0, h), 3.0, pal.text2);
+        }
+    }
+    Output { height, hits }
 }
 
-fn main_page(c: &mut Ctx) -> f32 {
+fn main_header(c: &mut Ctx) {
     let pal = *c.pal();
     let i = c.i;
-    // Header
     c.p.text("AI 额度", Rect::new(20.0, 12.0, 160.0, 28.0), font(15.0, SEMIBOLD, Align::Left), pal.text);
     let busy = i.states.iter().any(|s| s.in_flight);
     let btn = Rect::new(WIDTH - 16.0 - 32.0, 10.0, 32.0, 32.0);
@@ -328,7 +475,12 @@ fn main_page(c: &mut Ctx) -> f32 {
         String::new()
     };
     c.p.text(&note, Rect::new(btn.x - 200.0, 10.0, 196.0, 32.0), font(12.0, REGULAR, Align::Right), pal.text3);
+}
 
+fn main_page(c: &mut Ctx) -> f32 {
+    let pal = *c.pal();
+    let i = c.i;
+    main_header(c);
     let mut y = 52.0;
     let compact = i.cfg.compact;
     c.segmented(
@@ -339,7 +491,7 @@ fn main_page(c: &mut Ctx) -> f32 {
     );
     y += 32.0 + 12.0;
 
-    let enabled: Vec<ProviderId> = ProviderId::ALL.into_iter().filter(|id| i.cfg.enabled[id.index()]).collect();
+    let enabled: Vec<ProviderId> = ProviderId::ALL.into_iter().filter(|id| i.cfg.is_enabled(*id)).collect();
     if enabled.is_empty() {
         c.p.text("没有启用的服务，请在设置中开启", Rect::new(20.0, y, WIDTH - 40.0, 40.0), font(12.5, REGULAR, Align::Center), pal.text2);
         y += 48.0;
@@ -383,6 +535,7 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
     for row in &st.rows {
         h += match row {
             Row::PoolTitle(_) => 24.0,
+            Row::Balance(b) => 26.0 + if balance_line(i, b, st.dim).is_some() { FORECAST_LINE_H } else { 0.0 },
             Row::Win(w) => 26.0 + if forecast_of(i, w, st.dim).is_some() { FORECAST_LINE_H } else { 0.0 },
             Row::Message(m, _) => c.p.text_height(m, msg_font, inner_w) + 6.0,
         };
@@ -404,6 +557,17 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
     }
     if let Some((text, color)) = &st.chip {
         c.chip(card.right() - 14.0, y0 + 28.0, text, *color);
+    } else if !st.dim && balance_of(&st).is_some_and(|b| b.spend.is_some()) {
+        let head = Rect::new(inner_x + inner_w - 82.0, y0 + 20.0, 82.0, 16.0);
+        c.p.text("今日已用", head, font(11.5, REGULAR, Align::Right), pal.text3);
+    } else if st.rows.iter().any(|r| matches!(r, Row::Win(w) if w.resets_at.is_some())) {
+        // Column heading, so the times on the right read as "when the quota
+        // resets" and not "how long it lasts". Empty space reads larger than
+        // the same space filled by a forecast line, so the heading sits a bit
+        // closer to its column than the row pitch: between the name line and
+        // the "更新" line, about 36 px above the first time.
+        let head = Rect::new(inner_x + inner_w - 82.0, y0 + 20.0, 82.0, 16.0);
+        c.p.text("重置时间", head, font(11.5, REGULAR, Align::Right), pal.text3);
     }
 
     let mut y = y0 + 12.0 + 32.0 + 8.0;
@@ -417,6 +581,37 @@ fn detail_card(c: &mut Ctx, id: ProviderId, y0: f32) -> f32 {
                 first_title = false;
                 c.p.text(name, Rect::new(inner_x, y + 4.0, inner_w, 20.0), font(12.0, SEMIBOLD, Align::Left), pal.text2);
                 y += 24.0;
+            }
+            Row::Balance(b) => {
+                let low = balance_low(i.cfg, b) && !st.dim;
+                let num = if st.dim { pal.text2 } else if low { pal.danger } else { pal.text };
+                // Same rhythm as a usage window: label · amount · today's
+                // spend in the right column, then one quiet forecast line.
+                // Laid out exactly like a usage window: label · bar (¥100 =
+                // full, DeepSeek blue) · amount · today's spend in the right
+                // column, whose heading reads "今日已用".
+                let r = Rect::new(inner_x, y, inner_w, 26.0);
+                let today_col = Rect::new(r.right() - 70.0, r.y, 70.0, r.h);
+                let amount = Rect::new(today_col.x - 62.0, r.y, 58.0, r.h);
+                let bar_x = r.x + 56.0;
+                let bar = Rect::new(bar_x, r.y + r.h / 2.0 - 3.0, (amount.x - 8.0) - bar_x, 6.0);
+                c.p.text("余额", Rect::new(r.x, r.y, 52.0, r.h), font(12.0, REGULAR, Align::Left), pal.text2);
+                c.p.fill_round(bar, 3.0, pal.track);
+                let frac = (b.total / BALANCE_FULL).clamp(0.0, 1.0) as f32;
+                if frac > 0.0 {
+                    let fill_color = if st.dim { pal.text3 } else if low { pal.danger } else { pal.brand(id) };
+                    c.p.fill_round(Rect::new(bar.x, bar.y, (bar.w * frac).max(bar.h), bar.h), 3.0, fill_color);
+                }
+                c.p.text(&money(b, b.total), amount, font(13.0, SEMIBOLD, Align::Right), num);
+                if let Some(t) = b.spend.filter(|_| !st.dim) {
+                    c.p.text(&money(b, t.today), today_col, font(12.0, REGULAR, Align::Right), pal.text3);
+                }
+                y += 26.0;
+                if let Some((text, alarm)) = balance_line(i, b, st.dim) {
+                    let color = if !b.available { pal.danger } else if alarm { pal.text2 } else { pal.text3 };
+                    c.p.text(&text, Rect::new(inner_x + 56.0, y - 4.0, inner_w - 56.0, FORECAST_LINE_H), font(11.5, REGULAR, Align::Left), color);
+                    y += FORECAST_LINE_H;
+                }
             }
             Row::Win(win) => {
                 let fc = forecast_of(i, win, st.dim);
@@ -504,8 +699,16 @@ fn compact_list(c: &mut Ctx, ids: &[ProviderId], y0: f32) -> f32 {
             .collect();
         // Sub line: an error, or when the tightest window comes back.
         let sub_rect = Rect::new(tx, y + 28.0, card.right() - 14.0 - tx, 16.0);
+        let bal = balance_of(&st);
         if let Some((text, color)) = &st.chip {
             c.p.text(text, sub_rect, font(11.5, SEMIBOLD, Align::Left), *color);
+        } else if let Some(b) = bal {
+            let (text, color) = match balance_line(i, b, st.dim) {
+                Some((t, _)) if !b.available => (t, pal.danger),
+                Some((t, alarm)) if balance_days(i, b, st.dim).is_some() => (t, if alarm { pal.text2 } else { pal.text3 }),
+                _ => (today_text(b, st.dim).unwrap_or_else(|| st.sub.clone()), pal.text3),
+            };
+            c.p.text(&text, sub_rect, font(11.5, REGULAR, Align::Left), color);
         } else if let Some(d) = soonest_exhaust(i, wins.iter().copied(), st.dim) {
             c.p.text(&exhaust_text(d), sub_rect, font(11.5, REGULAR, Align::Left), pal.text2);
         } else if let Some(tight) = wins.iter().min_by(|a, b| a.remaining().total_cmp(&b.remaining())) {
@@ -539,6 +742,11 @@ fn compact_list(c: &mut Ctx, ids: &[ProviderId], y0: f32) -> f32 {
             }
             out
         };
+        if let Some(b) = bal {
+            let low = balance_low(i.cfg, b) && !st.dim;
+            let color = if st.dim { pal.text2 } else if low { pal.danger } else { pal.text };
+            c.p.text(&money(b, b.total), Rect::new(card.right() - 14.0 - 140.0, y + 8.0, 140.0, 21.0), font(14.0, SEMIBOLD, Align::Right), color);
+        }
         let mut right = card.right() - 14.0;
         for win in first_pool.iter().take(2).rev() {
             // Meters sit on the name line so the sub line has the full width.
@@ -568,17 +776,22 @@ fn section_label(c: &Ctx, text: &str, y: f32) -> f32 {
     y + 24.0
 }
 
+fn settings_header(c: &mut Ctx) {
+    let pal = *c.pal();
+    c.icon_button(Rect::new(12.0, 10.0, 32.0, 32.0), ICON_BACK, Action::Back, pal.text2);
+    c.p.text("设置", Rect::new(52.0, 12.0, 160.0, 28.0), font(15.0, SEMIBOLD, Align::Left), pal.text);
+}
+
 fn settings_page(c: &mut Ctx) -> f32 {
     let pal = *c.pal();
     let i = c.i;
-    c.icon_button(Rect::new(12.0, 10.0, 32.0, 32.0), ICON_BACK, Action::Back, pal.text2);
-    c.p.text("设置", Rect::new(52.0, 12.0, 160.0, 28.0), font(15.0, SEMIBOLD, Align::Left), pal.text);
+    settings_header(c);
 
     let x0 = PAD;
     let w = WIDTH - 2.0 * PAD;
     let mut y = section_label(c, "显示的服务", 54.0);
     let row_h = 44.0;
-    let card = Rect::new(x0, y, w, row_h * 3.0);
+    let card = Rect::new(x0, y, w, row_h * ProviderId::ALL.len() as f32);
     c.card_bg(card);
     for id in ProviderId::ALL {
         let ry = y + row_h * id.index() as f32;
@@ -592,7 +805,7 @@ fn settings_page(c: &mut Ctx) -> f32 {
         }
         c.tile(x0 + 14.0, ry + 11.0, 22.0, id);
         c.p.text(id.name(), Rect::new(x0 + 46.0, ry, 200.0, row_h), font(13.0, REGULAR, Align::Left), pal.text);
-        c.toggle(row.right() - 14.0, ry + row_h / 2.0, i.cfg.enabled[id.index()]);
+        c.toggle(row.right() - 14.0, ry + row_h / 2.0, i.cfg.is_enabled(id));
     }
     y = card.bottom() + 14.0;
 
@@ -630,6 +843,10 @@ fn settings_page(c: &mut Ctx) -> f32 {
     );
     y += 32.0 + 14.0;
 
+    // Antigravity options only matter while the service is shown.
+    if !i.cfg.is_enabled(ProviderId::Antigravity) {
+        return settings_footer(c, y - 4.0);
+    }
     y = section_label(c, "Antigravity", y);
     let desc = "访问令牌过期时，用本机已保存的刷新令牌向 Google 换取临时令牌，只保存在内存，不写回、不改动登录。";
     let desc_font = Font { wrap: true, ..font(11.5, REGULAR, Align::Left) };
@@ -666,10 +883,14 @@ fn settings_page(c: &mut Ctx) -> f32 {
             py += pool_h;
         }
     }
-    y = card.bottom() + 10.0;
+    settings_footer(c, card.bottom() + 10.0)
+}
+
+fn settings_footer(c: &mut Ctx, y: f32) -> f32 {
+    let pal = *c.pal();
     let mem = crate::ui::window::private_mb().map(|m| format!(" · 内存 {m:.1} MB")).unwrap_or_default();
     c.p.text(
-        &format!("v0.3.4{mem} · 配置 %APPDATA%\\AI-Usage-Lite"),
+        &format!("v{}{mem} · 配置 %APPDATA%\\AI-Usage-Lite", env!("CARGO_PKG_VERSION")),
         Rect::new(20.0, y, WIDTH - 40.0, 22.0),
         font(11.0, REGULAR, Align::Left),
         pal.text3,
@@ -677,15 +898,20 @@ fn settings_page(c: &mut Ctx) -> f32 {
     y + 30.0
 }
 
-fn consent_page(c: &mut Ctx) -> f32 {
+fn consent_header(c: &mut Ctx) {
     let pal = *c.pal();
     c.p.text("首次使用确认", Rect::new(20.0, 12.0, 240.0, 28.0), font(15.0, SEMIBOLD, Align::Left), pal.text);
+}
+
+fn consent_page(c: &mut Ctx) -> f32 {
+    let pal = *c.pal();
+    consent_header(c);
     let x0 = PAD;
     let w = WIDTH - 2.0 * PAD;
     let body = Font { wrap: true, ..font(12.0, REGULAR, Align::Left) };
     let items: [(&str, &str); 4] = [
-        ("只读取本机已有登录", "Claude：~\\.claude\\.credentials.json 或 Claude 桌面版加密令牌缓存；Codex：~\\.codex\\auth.json；Antigravity：Windows 凭据 gemini:antigravity"),
-        ("只访问官方额度接口", "api.anthropic.com/api/oauth/usage、chatgpt.com/backend-api/wham/usage、cloudcode-pa.googleapis.com（经系统代理）"),
+        ("只读取本机已有登录", "Claude：~\\.claude\\.credentials.json 或 Claude 桌面版加密令牌缓存；Codex：~\\.codex\\auth.json；Antigravity：Windows 凭据 gemini:antigravity；DeepSeek：你用脚本保存的 Windows 凭据 AI-Usage-Lite/DeepSeek"),
+        ("只访问官方额度接口", "api.anthropic.com/api/oauth/usage、chatgpt.com/backend-api/wham/usage、cloudcode-pa.googleapis.com、api.deepseek.com/user/balance（经系统代理）"),
         ("不消耗额度、不改登录", "不调用任何模型，不刷新或写回令牌，不上传到第三方，不记录令牌"),
         ("已知风险", "这些是各客户端内部使用的非公开接口，可能变更或限流；查询频率与官方客户端相当"),
     ];
@@ -732,7 +958,7 @@ fn mini_page(c: &mut Ctx) -> f32 {
     let pal = *c.pal();
     let i = c.i;
     let w = MINI_WIDTH;
-    let ids: Vec<ProviderId> = ProviderId::ALL.into_iter().filter(|id| i.cfg.enabled[id.index()]).collect();
+    let ids: Vec<ProviderId> = ProviderId::ALL.into_iter().filter(|id| i.cfg.is_enabled(*id)).collect();
     let row_h = 44.0;
     let top = 8.0;
     let footer_h = 32.0;
@@ -753,6 +979,22 @@ fn mini_page(c: &mut Ctx) -> f32 {
         c.p.text(id.name(), Rect::new(46.0, y + 5.0, 100.0, 18.0), font(13.0, SEMIBOLD, Align::Left), pal.text);
         let right = Rect::new(w - 14.0 - 90.0, y + 5.0, 90.0, 20.0);
         let sub = Rect::new(46.0, y + 23.0, w - 60.0, 16.0);
+        if let Some(b) = balance_of(&st) {
+            let low = balance_low(i.cfg, b);
+            let color = if st.dim { pal.text2 } else if low { pal.danger } else { pal.brand(*id) };
+            let wide = Rect::new(w - 14.0 - 120.0, right.y, 120.0, right.h);
+            c.p.text(&format!("余额 {}", money(b, b.total)), wide, font(13.0, SEMIBOLD, Align::Right), color);
+            let (line, color) = match &st.chip {
+                Some((text, col)) => (text.clone(), *col),
+                None if !b.available => (UNAVAILABLE.into(), pal.danger),
+                None => match balance_days(i, b, st.dim) {
+                    Some(d) => (days_text(d), pal.text2),
+                    None => (st.sub.clone(), pal.text3),
+                },
+            };
+            c.p.text(&line, sub, font(11.5, REGULAR, Align::Left), color);
+            continue;
+        }
         match (tightest(&st), &st.chip) {
             (Some(win), chip) => {
                 let remaining = win.remaining();
