@@ -8,7 +8,7 @@ Windows 11 托盘额度监控：Claude、Codex、Antigravity 的 5 小时 / 每�
 
 ![界面预览](docs/preview.png)
 
-下载：见本仓库 [Releases](../../releases) 页面的 `AI-Usage-Lite-v0.4.5-windows-x64.zip`。
+下载：见本仓库 [Releases](../../releases) 页面的 `AI-Usage-Lite-v0.4.6-windows-x64.zip`。
 
 > 非官方工具，与 Anthropic、OpenAI、Google、DeepSeek 无关联；Claude、Codex、Antigravity、DeepSeek 为各自所有者的商标。
 
@@ -20,6 +20,7 @@ Windows 11 托盘额度监控：Claude、Codex、Antigravity 的 5 小时 / 每�
 | 双击 `演示模式.cmd` | 示例数据，不读取任何文件、不联网 |
 | 双击 `设置DeepSeek密钥.cmd` | 保存（或删除）DeepSeek API Key，见下方「DeepSeek 余额」 |
 | 双击 `只读诊断.cmd` | 对各服务各做一次只读查询，生成不含令牌的报告（`%LOCALAPPDATA%\AI-Usage-Lite\diagnose-*.txt`），用于和官方页面核对 |
+| 命令行 `AI-Usage-Lite.exe --diagnose --silent` | 同上，但不弹任何对话框，供脚本或 AI 调用。退出码 `0` 表示报告已保存，非 `0` 表示保存失败。`--silent` 只在同时带 `--diagnose` 时生效 |
 
 成功标志：任务栏右下角出现三根竖条的图标（依次为 Claude 橙色、Codex 黑色／深色任务栏下白色、Antigravity 蓝色，高度 = 最紧张窗口的剩余比例；低于 10% 变红色，灰色空槽表示无数据或需要登录）。鼠标悬停可看文字摘要。
 

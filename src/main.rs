@@ -7,6 +7,8 @@
 //!   AI-Usage-Lite.exe --demo-errors  sample error states
 //!   AI-Usage-Lite.exe --diagnose   one read-only query per service, writes a
 //!                                  redacted report and exits
+//!   AI-Usage-Lite.exe --diagnose --silent  same without any dialog, for
+//!                                  scripts; exit code 0 = report saved
 
 mod config;
 mod diag;
@@ -39,7 +41,11 @@ fn main() {
     let has = |flag: &str| args.iter().any(|a| a == flag);
 
     if has("--diagnose") {
-        run_diagnose();
+        let silent = has("--silent");
+        let saved = run_diagnose(silent);
+        if silent && !saved {
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -101,17 +107,21 @@ fn main() {
     }
 }
 
-fn run_diagnose() {
-    let ok = message(
-        "诊断将对 Claude、Codex、Antigravity 各做一次只读额度查询，\n\
-         并在已设置 API Key 时查询一次 DeepSeek 余额：\n\n\
-         · 读取本机已有登录（不修改、不刷新、不写回）\n\
-         · 只访问官方额度接口，不调用任何模型\n\
-         · 报告不含令牌，保存到 %LOCALAPPDATA%\\AI-Usage-Lite\n\n继续吗？",
-        MB_OKCANCEL | MB_ICONINFORMATION,
-    );
-    if !ok {
-        return;
+/// Returns whether the report was saved (`true` when the user cancels).
+/// `silent` skips both dialogs, for callers that cannot click them.
+fn run_diagnose(silent: bool) -> bool {
+    if !silent {
+        let ok = message(
+            "诊断将对 Claude、Codex、Antigravity 各做一次只读额度查询，\n\
+             并在已设置 API Key 时查询一次 DeepSeek 余额：\n\n\
+             · 读取本机已有登录（不修改、不刷新、不写回）\n\
+             · 只访问官方额度接口，不调用任何模型\n\
+             · 报告不含令牌，保存到 %LOCALAPPDATA%\\AI-Usage-Lite\n\n继续吗？",
+            MB_OKCANCEL | MB_ICONINFORMATION,
+        );
+        if !ok {
+            return true;
+        }
     }
     let cfg = config::Config::load();
     let mut report = String::new();
@@ -171,12 +181,15 @@ fn run_diagnose() {
         d.join(format!("diagnose-{t}.txt"))
     });
     let saved = path.as_ref().map(|p| std::fs::write(p, report.as_bytes()).is_ok()).unwrap_or(false);
-    message(
-        &format!(
-            "{}\n\n{}",
-            summary.join("\n"),
-            if saved { format!("报告：{}", path.unwrap().display()) } else { "报告保存失败".into() }
-        ),
-        MB_OK | MB_ICONINFORMATION,
-    );
+    if !silent {
+        message(
+            &format!(
+                "{}\n\n{}",
+                summary.join("\n"),
+                if saved { format!("报告：{}", path.unwrap().display()) } else { "报告保存失败".into() }
+            ),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+    saved
 }
